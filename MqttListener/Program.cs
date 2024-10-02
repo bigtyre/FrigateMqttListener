@@ -6,7 +6,6 @@ using System.Text.RegularExpressions;
 using uPLibrary.Networking.M2Mqtt;
 using uPLibrary.Networking.M2Mqtt.Messages;
 
-
 var configBuilder = new ConfigurationBuilder();
 configBuilder.AddEnvironmentVariables();
 configBuilder.AddKeyPerFile("/var/run/secrets", optional: true);
