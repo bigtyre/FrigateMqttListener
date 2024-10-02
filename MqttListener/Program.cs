@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using uPLibrary.Networking.M2Mqtt;
 using uPLibrary.Networking.M2Mqtt.Messages;
 
@@ -42,42 +43,49 @@ static void Client_ConnectionClosed(object sender, EventArgs e)
     Console.WriteLine("MQTT connection closed");
 }
 
-// Connect to the broker
-string clientId = Guid.NewGuid().ToString();
-if (mqttUsername != null)
-{
-    client.Connect(clientId, mqttUsername, mqttPassword ?? "");
-}
-else
-{
-    client.Connect(clientId);
-}
 
-if (!client.IsConnected)
-{
-    Console.WriteLine("Failed to connect.");
-    client.Disconnect();
-    return;
-}
-else
-{
-    Console.WriteLine("Connected successfully.");
-}
-
-// Subscribe to the specified topic
-client.Subscribe([topic], [MqttMsgBase.QOS_LEVEL_AT_LEAST_ONCE]);
-
-Console.WriteLine($"Listening to topic: {topic}");
 
 while(true)
 {
-    await Task.Delay(-1);
+    Console.WriteLine("MQTT Connecting");
+
+    try {
+        // Connect to the broker
+        string clientId = "frigate-event-listener-" + Guid.NewGuid().ToString();
+        if (mqttUsername != null)
+        {
+            client.Connect(clientId, mqttUsername, mqttPassword ?? "");
+        }
+        else
+        {
+            client.Connect(clientId);
+        }
+
+        // Subscribe to the specified topic
+        client.Subscribe([topic], [MqttMsgBase.QOS_LEVEL_AT_LEAST_ONCE]);
+
+        Console.WriteLine("MQTT Connected.");
+        Console.WriteLine($"Listening to topic: {topic}");
+
+        while (client.IsConnected)
+        {
+            await Task.Delay(500);
+        }
+
+        client.Disconnect();
+    }
+    catch (Exception ex)
+    {
+
+    }
+
+    Console.WriteLine($"Connection lost. Waiting 2 seconds before reconnecting");
+    await Task.Delay(TimeSpan.FromSeconds(2));
 }
 
 // Disconnect the client when done
-client.Disconnect();
 
-static void Client_MqttMsgPublishReceived(object sender, MqttMsgPublishEventArgs e)
+void Client_MqttMsgPublishReceived(object sender, MqttMsgPublishEventArgs e)
 {
     string message = System.Text.Encoding.UTF8.GetString(e.Message);
    // Console.WriteLine($"Message received on topic {e.Topic}: {message}");
@@ -96,7 +104,7 @@ static void Client_MqttMsgPublishReceived(object sender, MqttMsgPublishEventArgs
     }
 }
 
-static void HandleDetection(DetectionEvent detection)
+void HandleDetection(DetectionEvent detection)
 {
     var evt = detection.After;
 
@@ -110,7 +118,43 @@ static void HandleDetection(DetectionEvent detection)
 
     var labelInTitleCase = textInfo.ToTitleCase(label);
 
-    Console.WriteLine($"{time} {labelInTitleCase} detected on {camera}");
+    bool shouldNotify = true;
+
+    shouldNotify = IsInNotificationPeriod(camera, time);
+
+    Console.WriteLine($"{time} {labelInTitleCase} detected on {camera} with confidence {evt.TopScore:F3}. Notify: {(shouldNotify ? "Yes" : "No")}");
+}
+
+bool IsInNotificationPeriod(string camera, DateTimeOffset time)
+{
+    var scheduleRows = settings.Schedule;
+    if (scheduleRows.Count < 1)
+        return true;
+
+    foreach (var schedule in scheduleRows)
+    {
+        if (Regex.IsMatch(camera, schedule.Cameras) is false)
+            continue;
+        
+        if (schedule.WeekDays.Count > 0 && schedule.WeekDays.Contains(time.DayOfWeek) is false)
+            continue;
+
+        if (time.Hour < schedule.StartHour)
+            continue;
+
+        if (time.Hour == schedule.StartHour && time.Minute < schedule.StartMinute)
+            continue;
+
+        if (time.Hour > schedule.EndHour)
+            continue;
+
+        if (time.Hour == schedule.EndHour && time.Minute > schedule.EndMinute)
+            continue;
+
+        return true;
+    }
+
+    return false;
 }
 
 static DateTimeOffset FromFractionalUnixTimes(double time)
@@ -152,4 +196,19 @@ class MqttSettings
 class AppSettings
 {
     public MqttSettings Mqtt { get; } = new();
+
+    public List<NotificationSchedule> Schedule { get; } = [];
+}
+
+class NotificationSchedule
+{
+    public string Cameras { get; set; } = ".*";
+
+    public List<DayOfWeek> WeekDays { get; set; } = [];
+
+    public int StartHour { get; set; } = 0;
+    public int StartMinute { get; set; } = 0;
+
+    public int EndHour { get; set; } = 24;
+    public int EndMinute { get; set; } = 0;
 }
