@@ -25,7 +25,19 @@ var mqttPassword = mqttSettings.Password;
 
 var smtpSender = new SmtpMailSender(settings.Smtp);
 
-var notificationSender = new NotificationSender(settings.NotificationIntervalSeconds, smtpSender);
+var frigateSettings = settings.Frigate;
+var frigateUrl = frigateSettings.Url ?? throw new Exception("Frigate API Url not configured.");
+var frigateUsername = frigateSettings.Username ?? throw new Exception("Frigate API username not configured.");
+var frigatePassword = frigateSettings.Password ?? throw new Exception("Frigate API password not configured.");
+var frigateApiClient = new FrigateApiClient(frigateUrl, frigateUsername, frigatePassword);
+
+var notificationSender = new NotificationSender(
+    settings.NotificationIntervalSeconds, 
+    smtpSender, 
+    settings.Notifications, 
+    smtpSender.DefaultSender, 
+    frigateApiClient
+);
 
 
 // Create an MQTT client
@@ -108,37 +120,65 @@ void Client_MqttMsgPublishReceived(object sender, MqttMsgPublishEventArgs e)
     }
 }
 
-void HandleDetection(DetectionEvent detection)
+async void HandleDetection(DetectionEvent detection)
 {
-    var evt = detection.After;
-
-    var camera = evt.Camera;
-    var label = evt.Label;
-    var timestamp = evt.FrameTime;
-
-    var time = FromFractionalUnixTimes(timestamp).ToOffset(TimeSpan.FromHours(10));
-
-    var textInfo = CultureInfo.CurrentCulture.TextInfo;
-
-    var labelInTitleCase = textInfo.ToTitleCase(label);
-
-    bool shouldNotify = true;
-
-    shouldNotify = IsInNotificationPeriod(camera, time);
-
-    Console.WriteLine($"{time} {labelInTitleCase} detected on {camera} with confidence {evt.TopScore:F3}. Notify: {(shouldNotify ? "Yes" : "No")}");
-
-    if (shouldNotify)
+    try
     {
-        notificationSender.SendNotification(detection);
+        var evt = detection.After;
+        var camera = evt.Camera;
+
+        var detectionType = detection.Type;
+        Console.WriteLine($"Detection: {detectionType}.");
+        if (detection.Type != "end")
+        {
+            return;
+        }
+
+        var eventId = evt.Id;
+        var endTime = evt.EndTime;
+        if (endTime is null)
+        {
+            Console.WriteLine($"Event ID {eventId} in progress on camera '{camera}'. End time not published");
+            return;
+        }
+
+        Console.WriteLine($"Event {eventId} ended on '{camera}'. End time {endTime}. Snapshot: {evt.Thumbpath}");
+
+
+        var label = string.Join(", ", evt.Data.Objects);
+        var timestamp = evt.StartTime;
+
+        var time = DateTimeExtensions.FromFractionalUnixTimes(timestamp).ToOffset(TimeSpan.FromHours(10));
+
+        var textInfo = CultureInfo.CurrentCulture.TextInfo;
+
+        var labelInTitleCase = textInfo.ToTitleCase(label);
+
+        var schedule = settings.Schedule;
+        bool shouldNotify = true;
+        IEnumerable<NotificationSchedule> matchedScheduleTimes = [];
+        if (schedule.Count > 0)
+        {
+            matchedScheduleTimes = GetMatchedNotificationPeriods(camera, time);
+            shouldNotify = matchedScheduleTimes.Any();
+        }
+
+        Console.WriteLine($"{time} {labelInTitleCase} detected on {camera} with confidence. Notify: {(shouldNotify ? "Yes" : "No")}");
+
+        if (!shouldNotify)
+            return;
+
+        await notificationSender.SendNotificationAsync(detection, matchedScheduleTimes);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine(ex.ToString());
     }
 }
 
-bool IsInNotificationPeriod(string camera, DateTimeOffset time)
+IEnumerable<NotificationSchedule> GetMatchedNotificationPeriods(string camera, DateTimeOffset time)
 {
     var scheduleRows = settings.Schedule;
-    if (scheduleRows.Count < 1)
-        return true;
 
     foreach (var schedule in scheduleRows)
     {
@@ -160,23 +200,7 @@ bool IsInNotificationPeriod(string camera, DateTimeOffset time)
         if (time.Hour == schedule.EndHour && time.Minute > schedule.EndMinute)
             continue;
 
-        return true;
+        yield return schedule;
     }
-
-    return false;
 }
 
-static DateTimeOffset FromFractionalUnixTimes(double time)
-{
-    // Separate the integer part (seconds) and the fractional part (milliseconds)
-    long seconds = (long)time;
-    double fractionalSeconds = time - seconds;
-
-    // Convert seconds to DateTimeOffset
-    DateTimeOffset dateTimeOffset = DateTimeOffset.FromUnixTimeSeconds(seconds);
-
-    // Add the fractional seconds (converted to milliseconds)
-    dateTimeOffset = dateTimeOffset.AddMilliseconds(fractionalSeconds * 1000);
-
-    return dateTimeOffset;
-}

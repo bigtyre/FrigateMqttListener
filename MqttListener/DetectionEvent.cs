@@ -1,4 +1,4 @@
 ﻿namespace MqttListener
 {
-    record DetectionEvent(FrameEvent Before, FrameEvent After);
+    record DetectionEvent(ReviewEvent Before, ReviewEvent After, string Type);
 }

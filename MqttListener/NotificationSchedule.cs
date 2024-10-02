@@ -11,5 +11,7 @@
 
         public int EndHour { get; set; } = 24;
         public int EndMinute { get; set; } = 0;
+
+        public NotificationSettings Notifications { get; } = new();
     }
 }
